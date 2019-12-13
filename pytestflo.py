@@ -9,6 +9,16 @@ def pytest_addoption(parser):
         action='store',
         help='TestFLO test plan key'
     )
+    parser.addoption(
+        '--host',
+        action='store',
+        help='Jira host'
+    )
+    parser.addoption(
+        '--token',
+        action='store',
+        help='Base64 encoded username:password string'
+    )
 
 
 def pytest_configure(config):
@@ -18,7 +28,10 @@ def pytest_configure(config):
     pytest.test_plan_key = None
     pytest.testflo_cases = []
     pytest.pytest_items = {}
-    pytest.jira = Jira()
+    pytest.jira = Jira(
+        config.getoption('--host'),
+        config.getoption('--token')
+    )
     test_plan_key = config.getoption('--testplan')
 
     if test_plan_key is not None:
