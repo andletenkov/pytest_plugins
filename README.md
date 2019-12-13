@@ -2,7 +2,9 @@
 Pytest plugin for integration with Jira TestFLO
 
 # how to use
-pytest test_module.py --testplan TFLO-123,
+```shell script
+pytest test_module.py --testplan TFLO-123
+```
 where TFLO-123 - test plan ID from Jira
 
 # examples
