@@ -12,7 +12,7 @@ def test_something():
     assert True
 
 
-@pytest.mark.testflo
+@pytest.mark.testflo("TFLO-2")
 @pytest.mark.parametrize("param", [
     1, 2, 3, 4, 5
 ])
