@@ -1,6 +1,6 @@
 import sys
 import pytest
-from jira_client import Jira
+from pytestflo.jira_client import Jira
 
 
 def pytest_addoption(parser):
