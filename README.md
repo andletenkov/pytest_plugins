@@ -1,2 +1,2 @@
 # pytestflo
-Repository contains pytest plugins.
+Repository contains some pytest plugins.
