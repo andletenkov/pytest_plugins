@@ -1,101 +1,149 @@
-import sys
+import os
+import allure
 import pytest
-from pytestflo.jira_client import Jira
+import plugins.pytestflo.strategies as run_strategies
+from logging import info as ilog
+from logging import warning as wlog
+from pluggy import HookspecMarker
+from plugins.pytestflo import utils
+
+hookspec = HookspecMarker("pytest")
+
+STRATEGY_ENV = "TFLO_RUN_BY"
+VALUE_ENV = "TFLO_RUN_VALUE"
+AVAILABLE_RUN_STRATEGIES = [
+    x.replace('RunStrategy', '')
+    for x in run_strategies.__dict__.keys()
+    if x.startswith('RunStrategy')
+]
 
 
 def pytest_addoption(parser):
     parser.addoption(
-        '--testplan',
-        action='store',
-        help='TestFLO test plan key'
+        "--run-by",
+        action="store",
+        dest="run_by",
+        choices=AVAILABLE_RUN_STRATEGIES,
+        help="Test execution strategy.",
+        default=""
     )
+
     parser.addoption(
-        '--host',
-        action='store',
-        help='Jira host'
+        "--run-value",
+        action="store",
+        dest="run_value",
+        help="Jira query value to execute tests with.",
+        default=""
     )
-    parser.addoption(
-        '--token',
-        action='store',
-        help='Base64 encoded username:password string'
+
+    parser.addini(
+        name="gitlab_api_token",
+        help="Gitlab API auth token",
+        default=""
+    )
+
+    parser.addini(
+        name="jira_server",
+        help="JIRA server URL",
+        default=""
+    )
+
+    parser.addini(
+        name="jira_email",
+        help="JIRA user e-mail",
+        default=""
+    )
+
+    parser.addini(
+        name="jira_password",
+        help="JIRA password",
+        default=""
     )
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_configure(config):
-    config.addinivalue_line(
-        'markers', 'testflo(key): mark test to map with existing testFLO test template'
+    config.addinivalue_line("markers", "testflo(key): mark test to map with existing TestFLO test template")
+
+    run_value = os.environ.get(VALUE_ENV) or config.option.run_value
+
+    strategy_name = os.environ.get(STRATEGY_ENV) or config.option.run_by
+    strategy_cls_name = "RunStrategy" + strategy_name
+    StrategyClass = getattr(run_strategies, strategy_cls_name, None)
+
+    if not StrategyClass:
+        raise ValueError(
+            f"Invalid run strategy name \"{strategy_name}\"! Available strategies: {AVAILABLE_RUN_STRATEGIES}")
+
+    pytest.tflo = StrategyClass(
+        config.getini("jira_server"),
+        config.getini("jira_email"),
+        config.getini("jira_password"),
+        run_value,
+        gitlab_token=config.getini("gitlab_api_token")
     )
-    pytest.test_plan_key = None
-    pytest.testflo_cases = []
-    pytest.pytest_items = {}
-    pytest.jira = Jira(
-        config.getoption('--host'),
-        config.getoption('--token')
-    )
-    test_plan_key = config.getoption('--testplan')
-
-    if test_plan_key is not None:
-        pytest.test_plan_key = test_plan_key
-        pytest.testflo_cases.extend(pytest.jira.get_test_items(test_plan_key))
 
 
-def _get_result(case):
-    """Getting test outcome and comment to post to Jira issue
-    :returns tuple of outcome and comment
-    """
-    if len(case.outcome) == 1:
-        out = case.outcome[0]
-    elif 'failed' in case.outcome:
-        out = 'failed'
-    else:
-        out = 'passed'
+@hookspec(firstresult=True)
+def pytest_collection_modifyitems(session, config, items):
+    items_cp = items.copy()
+    items.clear()
 
-    comment_header = "Done automatically\n"
-    display_names = [nodeid.split('::')[-1] for nodeid in case.nodeids]
-    comment_body = "\n".join(("{}: {}".format(*i) for i in dict(zip(display_names, case.outcome)).items()))
-    return out, comment_header + comment_body
+    for item in items_cp:
+        item.issue = None
 
+        tflo_marks = utils.get_mark_list(item, "testflo")
+        if not tflo_marks:
+            continue
 
-def pytest_terminal_summary(terminalreporter):
-    if pytest.test_plan_key:
-        print("\nUpdating TestFLO issues...", file=sys.stdout)
-        updated = int()
-        for item in pytest.testflo_cases:
-            if item.outcome:
-                result, comment = _get_result(item)
-                r = pytest.jira.set_status(item.case_id, result)
-                if r.status_code not in [200, 204]:
-                    print(r.text, file=sys.stdout)
-                else:
-                    pytest.jira.add_comment(item.case_id, comment)
-                    print(".", end="", file=sys.stdout)
-                    updated += 1
-        print(f"\n{updated} issues updated successfully", file=sys.stdout)
+        tflo_mark = tflo_marks[0]
 
+        if tflo_mark not in pytest.tflo.test_case_templates.keys():
+            continue
 
-def _get_testflo_mark_value(item):
-    """Getting TestFLO mark value for current test"""
-    return [mark.args[0] for mark in item.iter_markers(name='testflo')]
+        item.issue = pytest.tflo.test_case_templates[tflo_mark]
+        automation_status = str(item.issue.fields.customfield_11903)
 
+        if automation_status not in ("Automated", "Muted",):
+            continue
 
-def pytest_runtest_setup(item):
-    if item.config.getoption('--testplan'):
-        keys = _get_testflo_mark_value(item)
-        if keys:
-            template_keys = [case.template_key for case in pytest.testflo_cases]
-            if keys[0] not in template_keys:
-                pytest.skip("Not contained in test plan")
+        if automation_status == "Muted":
+            item.add_marker(pytest.mark.skip("Muted in Jira"))
+
+        # Устанаваливаем приятненькое имечко
+        params = utils.get_test_parameters(item)
+        nice_title = utils.get_allure_title(item, params)
+
+        item.add_marker(allure.title(nice_title))
+        item.add_marker(allure.link(f"{pytest.tflo.jira.client_info()}/browse/{tflo_mark}"))
+
+        parent = getattr(item.issue.fields.customfield_11401, "value", None)
+        suite = item.issue.fields.customfield_13015 or getattr(item.cls, "__name__", None) or item.module.__name__
+
+        if parent:
+            item.add_marker(allure.parent_suite(parent))
+        item.add_marker(allure.suite(suite))
+
+        nodes = item._nodeid.split("::")[:-1]
+        nodes.append(utils.get_pretty_name(item, params))
+        item._nodeid = "::".join(nodes)
+
+        items.append(item)
+
+    if not items:
+        wlog("Test not found!")
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_runtest_makereport(item, call):
-    result = yield
-    report = result.get_result()
+    report = (yield).get_result()
 
-    if call.when == "call":
-        keys = _get_testflo_mark_value(item)
-        if keys:
-            for case in pytest.testflo_cases:
-                if keys[0] == case.template_key:
-                    case.add_outcome(report.outcome)
-                    case.add_nodeid(item.nodeid)
+    if call.when != "call":
+        return report
+
+    pytest.tflo.on_pytest_runtest_makereport(item=item, report=report)
+    return report
+
+
+def pytest_sessionfinish(session, exitstatus):
+    pytest.tflo.on_pytest_sessionfinish()
