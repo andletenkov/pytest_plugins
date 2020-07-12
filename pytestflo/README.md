@@ -2,9 +2,10 @@
 Pytest plugin for integration with Jira TestFLO
 
 # how to use
-1. Mark pytest test functions with `@pytest.mark.testflo("TFLO-1")`, where `TFLO-1` - issue key form Jira, to link them with TestFLO issues
+1. Specify `jira_server`, `jira_email` and `jira_password` in pytest.ini
+2. Mark pytest test functions with `@pytest.mark.testflo("TFLO-1")`, where `TFLO-1` - issue key form Jira, to link them with TestFLO issues
 
-2.
+3.
 - Run Jira test items by specified testplan key:
 ```shell script
 pytest test_module.py --run-by Testplan --run-value TFLO-123
